@@ -4,6 +4,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useAudioSynthesizer } from './audio-synthesizer';
 import { useWadLoader } from './wad-loader';
 import { useDoomAudio } from '@/hooks/useDoomAudio';
+import { useDoomSprites, Sprite } from './doom-sprites';
+import { useDoomGameState } from '@/hooks/useDoomGameState';
 
 interface Player {
   x: number;
@@ -25,12 +27,8 @@ export function DoomRaycastEngine() {
   const [isRunning, setIsRunning] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
   
-  const playerRef = useRef<Player>({
-    x: 1.5,
-    y: 1.5, 
-    angle: 0,
-    speed: 0.03
-  });
+  // Use game state player instead of separate ref
+  const player = gameState.player;
   
   const keysRef = useRef<{ [key: string]: boolean }>({});
   const animationFrameRef = useRef<number>();
@@ -42,9 +40,13 @@ export function DoomRaycastEngine() {
   const { playDoomStyleMusic, playAmbientHum, stopAllSounds } = useAudioSynthesizer();
   const { loadMapData, getAvailableSounds, isLoading: wadLoading, error: wadError } = useWadLoader();
   const { playMusic, stopMusic, playSound, playFootstep, playShoot } = useDoomAudio();
+  const { createWeaponSprite, createEnemySprite, createItemSprite, createWallTexture, weapons } = useDoomSprites();
+  const { gameState, initializeLevel, updateEnemies, checkItemCollection, shootWeapon, switchWeapon, getVisibleSprites } = useDoomGameState();
   
   const [wadLoaded, setWadLoaded] = useState(false);
   const [availableSounds, setAvailableSounds] = useState<string[]>([]);
+  const [weaponSprites, setWeaponSprites] = useState<{ [key: string]: string }>({});
+  const [wallTextures, setWallTextures] = useState<{ [key: number]: string }>({});
 
   // Play authentic Doom sounds
   const playDoomSound = useCallback((soundName: string, volume: number = 0.5) => {
@@ -176,9 +178,6 @@ export function DoomRaycastEngine() {
       return;
     }
     
-    console.log('[DoomRaycast] Rendering frame...');
-    
-    const player = playerRef.current;
     const width = canvas.width;
     const height = canvas.height;
     
@@ -228,6 +227,57 @@ export function DoomRaycastEngine() {
       ctx.fillStyle = `rgb(${shadedR}, ${shadedG}, ${shadedB})`;
       ctx.fillRect(x, wallTop, 1, wallBottom - wallTop);
     }
+    
+    // Render sprites (enemies and items)
+    const sprites = getVisibleSprites();
+    const spritesWithDistance = sprites.map(sprite => {
+      const dx = sprite.x - player.x;
+      const dy = sprite.y - player.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      return { ...sprite, distance };
+    }).sort((a, b) => b.distance - a.distance); // Back to front
+
+    spritesWithDistance.forEach(sprite => {
+      // Calculate sprite position on screen
+      const dx = sprite.x - player.x;
+      const dy = sprite.y - player.y;
+      const angle = Math.atan2(dy, dx) - player.angle;
+      
+      // Only render if sprite is in front of player
+      if (Math.abs(angle) < Math.PI / 2) {
+        const spriteScreenX = (width / 2) * (1 + Math.tan(angle) / Math.tan(fov / 2));
+        const spriteHeight = height / sprite.distance * 0.5;
+        const spriteWidth = spriteHeight * (sprite.width || 1);
+        
+        if (spriteScreenX > -spriteWidth && spriteScreenX < width + spriteWidth) {
+          // Draw simple colored rectangle for now (will be replaced with actual sprites)
+          let spriteColor = '#FF0000'; // Default red
+          
+          if (sprite.texture === 'imp') spriteColor = '#8B4513'; // Brown
+          else if (sprite.texture === 'zombieman') spriteColor = '#556B2F'; // Olive
+          else if (sprite.texture === 'healthpack') spriteColor = '#00FF00'; // Green
+          else if (sprite.texture === 'ammo') spriteColor = '#FFFF00'; // Yellow
+          else if (sprite.texture === 'armor') spriteColor = '#0000FF'; // Blue
+          
+          ctx.fillStyle = spriteColor;
+          const spriteTop = (height - spriteHeight) / 2;
+          ctx.fillRect(
+            spriteScreenX - spriteWidth / 2,
+            spriteTop,
+            spriteWidth,
+            spriteHeight
+          );
+          
+          // Add simple face for enemies
+          if (sprite.texture === 'imp' || sprite.texture === 'zombieman') {
+            ctx.fillStyle = '#FF0000'; // Red eyes
+            const eyeSize = spriteWidth / 8;
+            ctx.fillRect(spriteScreenX - spriteWidth/4, spriteTop + spriteHeight/4, eyeSize, eyeSize);
+            ctx.fillRect(spriteScreenX + spriteWidth/8, spriteTop + spriteHeight/4, eyeSize, eyeSize);
+          }
+        }
+      }
+    });
     
     // Simple minimap
     const mapScale = 8;
@@ -279,7 +329,52 @@ export function DoomRaycastEngine() {
     );
     ctx.stroke();
     
-  }, [castRay]);
+    // Draw weapon sprite at bottom center
+    const weaponSprite = weaponSprites[player.weapon];
+    if (weaponSprite) {
+      const weaponImg = new Image();
+      weaponImg.src = weaponSprite;
+      if (weaponImg.complete) {
+        const weaponWidth = 200;
+        const weaponHeight = 150;
+        ctx.drawImage(
+          weaponImg,
+          width / 2 - weaponWidth / 2,
+          height - weaponHeight,
+          weaponWidth,
+          weaponHeight
+        );
+      }
+    }
+    
+    // Draw HUD
+    const hudHeight = 60;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.fillRect(0, height - hudHeight, width, hudHeight);
+    
+    // Health bar
+    ctx.fillStyle = '#FF0000';
+    ctx.fillRect(20, height - 40, 100, 20);
+    ctx.fillStyle = '#00FF00';
+    ctx.fillRect(20, height - 40, (player.health / 100) * 100, 20);
+    
+    // Armor bar
+    ctx.fillStyle = '#0000FF';
+    ctx.fillRect(140, height - 40, 100, 20);
+    ctx.fillStyle = '#00FFFF';
+    ctx.fillRect(140, height - 40, (player.armor / 100) * 100, 20);
+    
+    // Text info
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '14px monospace';
+    ctx.fillText(`Health: ${player.health}`, 20, height - 45);
+    ctx.fillText(`Armor: ${player.armor}`, 140, height - 45);
+    ctx.fillText(`Weapon: ${player.weapon}`, 280, height - 45);
+    ctx.fillText(`Ammo: ${player.ammo[player.weapon] || 0}`, 280, height - 25);
+    ctx.fillText(`Score: ${gameState.score}`, 450, height - 45);
+    ctx.fillText(`Level: ${gameState.level}`, 450, height - 25);
+    
+  }, [castRay, getVisibleSprites, player, gameState, weaponSprites]);
 
   const checkCollision = useCallback((x: number, y: number): boolean => {
     const mapX = Math.floor(x);
@@ -295,48 +390,57 @@ export function DoomRaycastEngine() {
   const gameLoop = useCallback(() => {
     if (!isRunning) return;
     
-    const player = playerRef.current;
     const keys = keysRef.current;
     
     let moved = false;
+    let newPlayerState = { ...player };
     
     // Movement
     if (keys['KeyW'] || keys['ArrowUp']) {
-      const newX = player.x + Math.cos(player.angle) * player.speed;
-      const newY = player.y + Math.sin(player.angle) * player.speed;
+      const newX = newPlayerState.x + Math.cos(newPlayerState.angle) * newPlayerState.speed;
+      const newY = newPlayerState.y + Math.sin(newPlayerState.angle) * newPlayerState.speed;
       if (!checkCollision(newX, newY)) {
-        player.x = newX;
-        player.y = newY;
+        newPlayerState.x = newX;
+        newPlayerState.y = newY;
         moved = true;
       }
     }
     
     if (keys['KeyS'] || keys['ArrowDown']) {
-      const newX = player.x - Math.cos(player.angle) * player.speed;
-      const newY = player.y - Math.sin(player.angle) * player.speed;
+      const newX = newPlayerState.x - Math.cos(newPlayerState.angle) * newPlayerState.speed;
+      const newY = newPlayerState.y - Math.sin(newPlayerState.angle) * newPlayerState.speed;
       if (!checkCollision(newX, newY)) {
-        player.x = newX;
-        player.y = newY;
+        newPlayerState.x = newX;
+        newPlayerState.y = newY;
         moved = true;
       }
     }
     
     // Rotation
     if (keys['KeyA'] || keys['ArrowLeft']) {
-      player.angle -= 0.03;
+      newPlayerState.angle -= 0.03;
     }
     
     if (keys['KeyD'] || keys['ArrowRight']) {
-      player.angle += 0.03;
+      newPlayerState.angle += 0.03;
     }
     
     // Shooting
     if (keys['Space']) {
       const now = Date.now();
       if (now - lastShootTimeRef.current > 500) { // Prevent rapid fire
+        shootWeapon(newPlayerState.x, newPlayerState.y, newPlayerState.angle);
         playShoot(); // Use new audio system
         lastShootTimeRef.current = now;
       }
+    }
+    
+    // Weapon switching
+    if (keys['Digit1']) {
+      switchWeapon('pistol');
+    }
+    if (keys['Digit2'] && player.ammo.shotgun > 0) {
+      switchWeapon('shotgun');
     }
     
     // Footstep sounds - use new audio system
@@ -348,12 +452,16 @@ export function DoomRaycastEngine() {
       }
     }
     
+    // Update game state
+    updateEnemies(newPlayerState.x, newPlayerState.y, 16); // ~60fps
+    checkItemCollection(newPlayerState.x, newPlayerState.y);
+    
     render();
     
     if (isRunning) {
       animationFrameRef.current = requestAnimationFrame(gameLoop);
     }
-  }, [isRunning, checkCollision, render, playFootstep]);
+  }, [isRunning, checkCollision, render, playFootstep, shootWeapon, switchWeapon, updateEnemies, checkItemCollection]);
 
   // Load WAD file data
   const loadWadData = useCallback(async () => {
@@ -399,6 +507,28 @@ export function DoomRaycastEngine() {
     
     console.log('[DoomRaycast] Engine initialized');
     
+    // Initialize weapon sprites
+    const pistolSprite = createWeaponSprite('pistol');
+    const shotgunSprite = createWeaponSprite('shotgun');
+    setWeaponSprites({
+      pistol: pistolSprite,
+      shotgun: shotgunSprite
+    });
+    
+    // Initialize wall textures
+    const brickTexture = createWallTexture('brick');
+    const metalTexture = createWallTexture('metal');
+    const hellTexture = createWallTexture('hell');
+    setWallTextures({
+      1: brickTexture,
+      2: metalTexture,
+      3: hellTexture,
+      4: metalTexture
+    });
+    
+    // Initialize level with enemies and items
+    initializeLevel(1);
+    
     // Load WAD data asynchronously (non-blocking)
     loadWadData().catch(error => {
       console.warn('[DoomRaycast] WAD loading failed but game continues:', error);
@@ -418,7 +548,7 @@ export function DoomRaycastEngine() {
     setIsInitialized(true);
     render(); // Initial render
     console.log('[DoomRaycast] Engine initialization complete');
-  }, [render, playDoomStyleMusic, playAmbientHum, loadWadData]);
+  }, [render, playMusic, playAmbientHum, loadWadData, createWeaponSprite, createWallTexture, initializeLevel]);
 
   // Key handling
   useEffect(() => {
@@ -483,10 +613,13 @@ export function DoomRaycastEngine() {
       {!isRunning ? (
         <div className="h-full flex flex-col items-center justify-center text-center space-y-4">
           <h2 className="text-4xl font-bold mb-4">DOOM</h2>
-          <p className="text-xl">Authentic Raycast Engine with WAD Assets</p>
+          <p className="text-xl">Complete Doom Game with Enemies & Items!</p>
           <div className="text-sm text-gray-400 space-y-1">
-            <p>WASD or Arrow Keys: Move & Turn</p>
-            <p>Spacebar: Shoot (with authentic Doom sounds!)</p>
+            <p>WASD/Arrow Keys: Move & Turn</p>
+            <p>Spacebar: Shoot enemies</p>
+            <p>1/2: Switch weapons (Pistol/Shotgun)</p>
+            <p>Collect items: Health (green), Ammo (yellow), Armor (blue)</p>
+            <p>Enemies: Imps (brown), Zombies (olive) with red eyes</p>
             {wadLoading && <p className="text-yellow-400">Loading WAD assets...</p>}
             {wadLoaded && <p className="text-green-400">✓ WAD assets loaded</p>}
             {wadError && <p className="text-red-400">⚠ WAD loading failed</p>}
